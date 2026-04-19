@@ -90,13 +90,22 @@ def _rel_to_px(region: tuple, w: int, h: int) -> tuple:
 
 # ─── Face Paste ───────────────────────────────────────────────────────────────
 
-def _paste_face(card: Image.Image, face_img_path: str, face_region_px: tuple) -> None:
+def _paste_face(card: Image.Image, face_img_path: str, face_region_px: tuple, brightness_adjust: bool = False) -> None:
     """Resize face to fill the exact face region. No square crop."""
     x1, y1, x2, y2 = face_region_px
     target_w = x2 - x1
     target_h = y2 - y1
     try:
         face = Image.open(face_img_path).convert("RGB")
+        
+        if brightness_adjust:
+            import random
+            from PIL import ImageEnhance
+            # Apply an unnatural brightness shift simulating wrong scan lighting
+            shift = random.choice([0.65, 0.75, 1.25, 1.40])
+            enhancer = ImageEnhance.Brightness(face)
+            face = enhancer.enhance(shift)
+
         # Fill the box directly — preserves all content, fills photo area cleanly
         face = face.resize((target_w, target_h), Image.LANCZOS)
         card.paste(face, (x1, y1))
@@ -123,13 +132,13 @@ def _write_value(
     color: tuple,
     align: str = "left",   # "left" | "center"
     valign: str = "center", # "center" | "top"
+    tamper_shift: bool = False,
+    tamper_spacing: bool = False,
 ) -> None:
     """
     Write text inside a pre-cleared region.
-    - left:   small left padding
-    - center: horizontally centred
-    - top/center vertically
     """
+    import random
     x1, y1, x2, y2 = region_px
     rw = x2 - x1
     rh = y2 - y1
@@ -141,14 +150,27 @@ def _write_value(
     if align == "center":
         tx = x1 + (rw - tw) // 2
     else:
-        tx = x1 + max(4, rw // 40)   # small left pad
+        tx = x1 + max(4, rw // 40)
 
     if valign == "top":
-        ty = y1 + max(2, rh // 6)    # push slightly down from top edge
+        ty = y1 + max(2, rh // 6)
     else:
-        ty = y1 + (rh - th) // 2         # always vertically centred
+        ty = y1 + (rh - th) // 2
 
-    draw.text((tx, ty), text, font=font, fill=color)
+    # Intentional misalignment
+    if tamper_shift:
+        tx += random.randint(-15, 15)
+        ty += random.randint(-10, 10)
+
+    if tamper_spacing:
+        # Draw characters one by one with jitter
+        cx = tx
+        for char in text:
+            draw.text((cx, ty + random.randint(-2, 2)), char, font=font, fill=color)
+            char_w = draw.textlength(char, font=font)
+            cx += char_w + random.uniform(1.0, 5.0)
+    else:
+        draw.text((tx, ty), text, font=font, fill=color)
 
 
 # ─── Main Compositor ──────────────────────────────────────────────────────────
@@ -162,6 +184,7 @@ def compose_card(
     aadhaar_number: str,
     output_path: str,
     face_region_px: Optional[tuple] = None,
+    tamper_instructions: Optional[dict] = None,
 ) -> str:
     """
     Produce a synthetic Aadhaar card by placing new personal data onto a template.
@@ -187,46 +210,65 @@ def compose_card(
     card = Image.open(template_path).convert("RGB")
     w, h = card.size
 
+    tamper = tamper_instructions or {}
+
+    face_bright  = tamper.get("face_brightness", False)
+    bad_fonts    = tamper.get("font_tamper_fields", [])
+    shift_fields = tamper.get("text_shift_fields", [])
+    space_fields = tamper.get("char_spacing_fields", [])
+
     # ── 1. Font sizes (calibrated to card height) ──────────────────────────
     name_sz    = max(10, int(h * FONT_SIZE_NAME))
     value_sz   = max(8,  int(h * FONT_SIZE_VALUE))
     aadhaar_sz = max(12, int(h * FONT_SIZE_AADHAAR))
 
-    font_name    = _get_font(name_sz,    bold=True)
-    font_value   = _get_font(value_sz,   bold=False)
-    font_aadhaar = _get_font(aadhaar_sz, bold=True)
+    def _get_target_font(field_id: str, default_sz: int, bold: bool) -> ImageFont.FreeTypeFont:
+        if field_id in bad_fonts:
+            try:
+                # Simulates a wrong font choice by forger
+                return ImageFont.truetype("C:/Windows/Fonts/Arial.ttf", default_sz)
+            except:
+                return _get_font(default_sz, bold=bold)
+        return _get_font(default_sz, bold=bold)
+
+    font_name    = _get_target_font("name", name_sz, bold=True)
+    font_value   = _get_target_font("value", value_sz, bold=False)
+    font_aadhaar = _get_target_font("aadhaar_num", aadhaar_sz, bold=True)
 
     draw = ImageDraw.Draw(card)
 
     # ── 2. Face ────────────────────────────────────────────────────────────
     # Ignore HAAR results; use exact config block to preserve proper aspect ratio sizing
     face_region_px = _rel_to_px(REGIONS["face"], w, h)
-    _paste_face(card, face_img_path, face_region_px)
+    _paste_face(card, face_img_path, face_region_px, brightness_adjust=face_bright)
 
     # ── 3. Name value — below the "नाम / Name:" label line ────────────────
     name_px = _rel_to_px(REGIONS["name"], w, h)
     _clear_region(card, name_px)                        # ensure clean white bg
     draw = ImageDraw.Draw(card)                          # refresh after paste
-    _write_value(draw, name, name_px, font_name, TEXT_COLOR_DARK, align="left")
+    _write_value(draw, name, name_px, font_name, TEXT_COLOR_DARK, align="left", 
+                 tamper_shift=("name" in shift_fields), tamper_spacing=("name" in space_fields))
 
     # ── 4. DOB value — just the date, after "जन्म तारीख / DOB:" label ─────
     dob_px = _rel_to_px(REGIONS["dob"], w, h)
     _clear_region(card, dob_px)
     draw = ImageDraw.Draw(card)
-    # The mask box is tall. Setting valign="top" aligns it perfectly inline with the label.
-    _write_value(draw, dob, dob_px, font_value, TEXT_COLOR_DARK, align="left", valign="top")
+    _write_value(draw, dob, dob_px, font_value, TEXT_COLOR_DARK, align="left", valign="top",
+                 tamper_shift=("dob" in shift_fields), tamper_spacing=("dob" in space_fields))
 
     # ── 5. Gender value — standalone word ─────────────────────────────────
     gender_px = _rel_to_px(REGIONS["gender"], w, h)
     _clear_region(card, gender_px)
     draw = ImageDraw.Draw(card)
-    _write_value(draw, gender.capitalize(), gender_px, font_value, TEXT_COLOR_DARK, align="left")
+    _write_value(draw, gender.capitalize(), gender_px, font_value, TEXT_COLOR_DARK, align="left",
+                 tamper_shift=("gender" in shift_fields), tamper_spacing=("gender" in space_fields))
 
     # ── 6. Aadhaar number — large bold, horizontally centred ──────────────
     num_px = _rel_to_px(REGIONS["aadhaar_num"], w, h)
     _clear_region(card, num_px)
     draw = ImageDraw.Draw(card)
-    _write_value(draw, aadhaar_number, num_px, font_aadhaar, TEXT_COLOR_NUM, align="center")
+    _write_value(draw, aadhaar_number, num_px, font_aadhaar, TEXT_COLOR_NUM, align="center",
+                 tamper_shift=("aadhaar_num" in shift_fields), tamper_spacing=("aadhaar_num" in space_fields))
 
     # ── 7. Save ────────────────────────────────────────────────────────────
     os.makedirs(os.path.dirname(output_path), exist_ok=True)

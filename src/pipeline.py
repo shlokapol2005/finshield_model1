@@ -39,6 +39,7 @@ from .config import (
     TARGET_FAKE,
     TARGET_REAL_SYNTHETIC,
     TEMPLATES_DIR,
+    FAKE_CATEGORIES_PROBS,
 )
 from .augmentor import apply_fake_augmentations
 from .card_composer import compose_card
@@ -154,6 +155,7 @@ def generate_real_samples(
     logger.info(f"Step 4 — Generating {n} real synthetic samples …")
     males, females = partition_by_gender(face_analysis)
     all_faces      = males + females
+    rng.shuffle(all_faces)
 
     if not all_faces:
         logger.warning("No usable face images — skipping real synthetic generation.")
@@ -170,13 +172,17 @@ def generate_real_samples(
 
     while generated < n and attempts < max_attempts:
         attempts += 1
-        face_fn, face_info = rng.choice(all_faces)
+        
+        # Sequentially pick to guarantee exactly 1 usage per face
+        face_idx = generated % len(all_faces)
+        face_fn, face_info = all_faces[face_idx]
+        
         gender  = face_info["gender"]
         age     = face_info["age"]
 
         name         = generate_indian_name(gender, rng)
         dob          = generate_dob(age, variance=3, rng=rng)
-        aadhaar_num  = generate_aadhaar_number(rng)
+        aadhaar_num  = generate_aadhaar_number(invalid=False, rng=rng)
         template_meta = _pick_template(templates, rng)
         template_path = os.path.join(TEMPLATES_DIR, template_meta["template"])
 
@@ -241,6 +247,7 @@ def generate_fake_samples(
     logger.info(f"Step 5 — Generating {n} fake/forged samples …")
     males, females = partition_by_gender(face_analysis)
     all_faces      = males + females
+    rng.shuffle(all_faces)
 
     if not all_faces:
         logger.warning("No usable face images — skipping fake generation.")
@@ -249,38 +256,83 @@ def generate_fake_samples(
         logger.warning("No templates — skipping fake generation.")
         return
 
-    # Fake type distribution: 40% gender-mismatch, 30% age-mismatch, 30% both
+    # Fake type distribution relies on the new FAKE_CATEGORIES_PROBS
     generated = 0
     attempts  = 0
     max_attempts = n * 5
 
     pbar = tqdm(total=n, desc="Fake/forged", unit="card")
+    cats = list(FAKE_CATEGORIES_PROBS.keys())
+    probs = list(FAKE_CATEGORIES_PROBS.values())
 
     while generated < n and attempts < max_attempts:
         attempts += 1
-        face_fn, face_info = rng.choice(all_faces)
+        
+        # Sequentially pick to guarantee exactly 1 usage per face
+        face_idx = generated % len(all_faces)
+        face_fn, face_info = all_faces[face_idx]
+        
         actual_gender = face_info["gender"]
         actual_age    = face_info["age"]
 
-        # -- Choose mismatch strategy --
-        strategy = rng.choices(
-            ["gender_mismatch", "age_mismatch", "both"],
-            weights=[0.35, 0.30, 0.35],
-        )[0]
+        # Step 1: Establish True Base Identity (Consistent)
+        name         = generate_indian_name(actual_gender, rng)
+        card_gender  = _gender_str(actual_gender)
+        dob          = generate_dob(actual_age, variance=3, rng=rng)
+        aadhaar_num  = generate_aadhaar_number(invalid=False, rng=rng)
 
-        if strategy in ("gender_mismatch", "both"):
-            name = get_mismatched_name(actual_gender, rng)
-            card_gender = "Male" if actual_gender == "female" else "Female"
-        else:
-            name = generate_indian_name(actual_gender, rng)
-            card_gender = _gender_str(actual_gender)
+        # Step 2: Randomly choose 2-3 tampering categories to apply
+        num_cats = rng.randint(2, 3)
+        # Weight-based selection, ensuring uniqueness
+        chosen_cats = []
+        while len(chosen_cats) < num_cats:
+            c = rng.choices(cats, weights=probs, k=1)[0]
+            if c not in chosen_cats:
+                chosen_cats.append(c)
 
-        if strategy in ("age_mismatch", "both"):
-            dob = get_mismatched_dob(actual_age, offset_years=25, rng=rng)
-        else:
-            dob = generate_dob(actual_age, variance=3, rng=rng)
+        tamper_instructions = {
+            "face_brightness": False,
+            "font_tamper_fields": [],
+            "text_shift_fields": [],
+            "char_spacing_fields": []
+        }
 
-        aadhaar_num   = generate_aadhaar_number(rng)
+        # Step 3: Apply Semantic Inconsistencies
+        if "semantic" in chosen_cats:
+            subtype = rng.choice(["gender", "age", "aadhaar"])
+            if subtype == "gender":
+                name = get_mismatched_name(actual_gender, rng)
+                card_gender = "Male" if actual_gender == "female" else "Female"
+            elif subtype == "age":
+                dob = get_mismatched_dob(actual_age, offset_years=25, rng=rng)
+            else:
+                aadhaar_num = generate_aadhaar_number(invalid=True, rng=rng)
+
+        # Step 4: Apply Partial Document Editing
+        # Simulates a forger changing JUST ONE string, often with a subtle font/position penalty
+        if "partial_editing" in chosen_cats:
+            subtype = rng.choice(["name", "dob", "aadhaar_num"])
+            if subtype == "name":
+                name = get_mismatched_name(actual_gender, rng)
+                tamper_instructions["text_shift_fields"].append("name")
+                tamper_instructions["font_tamper_fields"].append("name")
+            elif subtype == "dob":
+                dob = get_mismatched_dob(actual_age, offset_years=25, rng=rng)
+                tamper_instructions["text_shift_fields"].append("dob")
+            elif subtype == "aadhaar_num":
+                aadhaar_num = generate_aadhaar_number(invalid=True, rng=rng)
+                tamper_instructions["char_spacing_fields"].append("aadhaar_num")
+
+        # Step 5: Composer-level Tampering limits
+        if "face_tampering" in chosen_cats:
+            tamper_instructions["face_brightness"] = True
+        
+        if "text_tampering" in chosen_cats:
+            targets = rng.sample(["name", "dob", "gender", "aadhaar_num"], k=rng.randint(1, 2))
+            tamper_instructions["font_tamper_fields"].extend(targets)
+            if rng.random() > 0.5:
+                tamper_instructions["char_spacing_fields"].append(rng.choice(["name", "aadhaar_num"]))
+
         template_meta = _pick_template(templates, rng)
         template_path = os.path.join(TEMPLATES_DIR, template_meta["template"])
 
@@ -292,7 +344,6 @@ def generate_fake_samples(
 
         if not dry_run:
             try:
-                face_region_px = tuple(template_meta["face_region"])
                 compose_card(
                     template_path  = template_path,
                     face_img_path  = _face_path(face_fn),
@@ -301,12 +352,14 @@ def generate_fake_samples(
                     gender         = card_gender,
                     aadhaar_number = aadhaar_num,
                     output_path    = out_path,
-                    face_region_px = face_region_px,
+                    face_region_px = None,
+                    tamper_instructions = tamper_instructions,
                 )
-                # Apply visual augmentations
+                
+                # Apply structural / image_quality / border visual augmentations
                 img = Image.open(out_path)
-                img = apply_fake_augmentations(img, rng)
-                img.save(out_path, format="JPEG", quality=88)
+                img = apply_fake_augmentations(img, chosen_cats, rng)
+                img.save(out_path, format="JPEG", quality=rng.randint(85, 95))
             except Exception as e:
                 logger.debug(f"Fake generation failed: {e}")
                 continue
@@ -320,7 +373,7 @@ def generate_fake_samples(
             "age":         actual_age,
             "dob":         dob,
             "aadhaar_num": aadhaar_num,
-            "notes":       f"strategy={strategy}|card_gender={card_gender}|face_gender={actual_gender}",
+            "notes":       f"cats={'+'.join(chosen_cats)}|card_gender={card_gender}|face_gender={actual_gender}",
         })
         generated += 1
         pbar.update(1)

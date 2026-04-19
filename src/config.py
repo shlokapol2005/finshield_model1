@@ -78,16 +78,27 @@ HAAR_SCALE_FACTOR  = 1.1
 HAAR_MIN_NEIGHBORS = 4
 HAAR_MIN_SIZE      = (60, 60)
 
-# ─── Fake Augmentation ────────────────────────────────────────────────────────
-AUG_PROBS = {
-    "jpeg_compress":    0.70,
-    "gaussian_blur":    0.50,
-    "gaussian_noise":   0.40,
-    "affine_warp":      0.35,
-    "face_shift":       0.45,
-    "color_jitter":     0.30,
-    "text_blur":        0.55,
-    "border_artifact":  0.25,
+# ─── High-Fidelity Fake Configuration ─────────────────────────────────────────
+
+# Probabilities for picking EACH category when generating a fake sample.
+# We aim to pick exactly 2-3 categories total to keep the FAKE realistic.
+FAKE_CATEGORIES_PROBS = {
+    "semantic":         0.50, # Wrong gender, wrong age, malformed aadhaar
+    "partial_editing":  0.40, # Editing only one specific text field
+    "face_tampering":   0.35, # Face scale, shift, brightness
+    "text_tampering":   0.45, # Blur, font variation, character shift in text
+    "image_quality":    0.60, # JPEG, Blur, Noise, Color
+    "structural":       0.25, # Affine wrap, Aadhaar global shift
+    "border_crop":      0.20, # Cropped edges, copy-paste border artifacts
+}
+
+# ─── Individual Augmentation Settings ─────────────────────────────────────────
+AUG_SETTINGS = {
+    "jpeg_compress":    (15, 45),    # Quality range
+    "gaussian_blur":    (0.6, 1.8),  # Radius range
+    "gaussian_noise":   (5, 20),     # Sigma range
+    "affine_warp":      (-3, 3),     # Rotation angle range
+    "face_shift":       (5, 15),     # Pixel shift range
 }
 
 # ─── Reproducibility ──────────────────────────────────────────────────────────

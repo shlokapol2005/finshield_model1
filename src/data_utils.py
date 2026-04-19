@@ -102,10 +102,11 @@ def _verhoeff_checksum(number: str) -> int:
     return _VERHOEFF_INV[c]
 
 
-def generate_aadhaar_number(rng: random.Random = None) -> str:
+def generate_aadhaar_number(invalid: bool = False, rng: random.Random = None) -> str:
     """
-    Generate a valid 12-digit Aadhaar number with Verhoeff checksum.
-    Returns formatted string: 'XXXX XXXX XXXX'
+    Generate a 12-digit Aadhaar number with Verhoeff checksum.
+    If invalid=True, randomly returns 11 or 13 digits to simulate a fake/forgery.
+    Returns formatted string: 'XXXX XXXX XXXX' (or misaligned if invalid)
     """
     if rng is None:
         rng = random
@@ -113,9 +114,20 @@ def generate_aadhaar_number(rng: random.Random = None) -> str:
     first = str(rng.randint(2, 9))
     middle = "".join([str(rng.randint(0, 9)) for _ in range(10)])
     base = first + middle          # 11 digits
-    check = _verhoeff_checksum(base)
-    full = base + str(check)       # 12 digits
-    return f"{full[:4]} {full[4:8]} {full[8:]}"
+
+    if invalid:
+        # Either 10 random digits (11 total) or 12 random digits (13 total)
+        if rng.choice([True, False]):
+            full = base[:-1] # 10 digits
+        else:
+            full = base + str(rng.randint(0, 9)) + str(rng.randint(0, 9)) # 13 digits
+    else:
+        check = _verhoeff_checksum(base)
+        full = base + str(check)       # 12 digits
+
+    # Format into groups of 4
+    groups = [full[i:i+4] for i in range(0, len(full), 4)]
+    return " ".join(groups)
 
 
 # ─── Name Generators ─────────────────────────────────────────────────────────

@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageFilter, ImageDraw
 
-from .config import AUG_PROBS, REGIONS
+from .config import REGIONS, AUG_SETTINGS
 
 logger = logging.getLogger(__name__)
 
@@ -153,53 +153,79 @@ def border_artifact(img: Image.Image, rng: random.Random) -> Image.Image:
     return img
 
 
+def edge_crop(img: Image.Image, rng: random.Random) -> Image.Image:
+    """Simulate a slightly cropped image (e.g. edge artifacts)."""
+    w, h = img.size
+    crop_w = int(w * rng.uniform(0.01, 0.05))
+    crop_h = int(h * rng.uniform(0.01, 0.05))
+
+    left   = rng.choice([0, crop_w])
+    top    = rng.choice([0, crop_h])
+    right  = w - rng.choice([0, crop_w])
+    bottom = h - rng.choice([0, crop_h])
+
+    cropped = img.crop((left, top, right, bottom))
+    return cropped.resize((w, h), Image.LANCZOS)
+
+
 # ─── Augmentation Registry ────────────────────────────────────────────────────
 
 _AUG_REGISTRY: dict[str, Callable] = {
+    # Image Quality
     "jpeg_compress":   jpeg_compress,
     "gaussian_blur":   gaussian_blur_full,
     "gaussian_noise":  gaussian_noise,
-    "affine_warp":     affine_warp,
-    "face_shift":      face_shift,
     "color_jitter":    color_jitter,
-    "text_blur":       text_region_blur,
+
+    # Structural
+    "affine_warp":     affine_warp,
+
+    # Border / Crop
     "border_artifact": border_artifact,
+    "edge_crop":       edge_crop,
+
+    # Sub-region / Text
+    "text_blur":       text_region_blur,
 }
 
 
 # ─── Public Entrypoint ────────────────────────────────────────────────────────
 
-def apply_fake_augmentations(img: Image.Image, rng: random.Random = None) -> Image.Image:
+def apply_fake_augmentations(img: Image.Image, applied_categories: list[str], rng: random.Random = None) -> Image.Image:
     """
-    Apply a random subset of fake augmentations to `img`.
-    Each augmentation is applied with its probability from AUG_PROBS.
-
-    At least one augmentation is always guaranteed.
-    Returns the augmented PIL Image.
+    Apply global image augmentations based on the chosen categories.
     """
     if rng is None:
         rng = random
 
     applied = []
-    for name, fn in _AUG_REGISTRY.items():
-        prob = AUG_PROBS.get(name, 0.5)
-        if rng.random() < prob:
-            try:
-                img = fn(img, rng)
-                applied.append(name)
-            except Exception as e:
-                logger.warning(f"Augmentation '{name}' failed: {e}")
 
-    # Guarantee at least one augmentation
-    if not applied:
-        fallback = rng.choice(list(_AUG_REGISTRY.keys()))
-        try:
-            img = _AUG_REGISTRY[fallback](img, rng)
-            applied.append(fallback)
-        except Exception as e:
-            logger.warning(f"Fallback augmentation '{fallback}' failed: {e}")
+    if "image_quality" in applied_categories:
+        # Pick 1 or 2 quality hits
+        attacks = rng.sample(["jpeg_compress", "gaussian_blur", "gaussian_noise", "color_jitter"], k=rng.randint(1, 2))
+        for attack in attacks:
+            img = _AUG_REGISTRY[attack](img, rng)
+            applied.append(attack)
 
-    logger.debug(f"Applied augmentations: {applied}")
+    if "structural" in applied_categories:
+        img = _AUG_REGISTRY["affine_warp"](img, rng)
+        applied.append("affine_warp")
+
+    if "border_crop" in applied_categories:
+        attack = rng.choice(["border_artifact", "edge_crop"])
+        img = _AUG_REGISTRY[attack](img, rng)
+        applied.append(attack)
+
+    if "text_tampering" in applied_categories:
+        # Some text tampering is handled by card_composer (fonts, spacing, shifts).
+        # We also randomly apply post-process text blur here.
+        if rng.random() < 0.5:
+            img = _AUG_REGISTRY["text_blur"](img, rng)
+            applied.append("text_blur")
+
+    # (Note: "face_tampering", "semantic", "partial_editing" are fully handled in card_composer and pipeline)
+
+    logger.debug(f"Applied visual augmentations: {applied}")
     return img
 
 
