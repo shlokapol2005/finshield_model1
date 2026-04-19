@@ -1,0 +1,21 @@
+[
+  {
+    "source": "100front_scaled_up.jpg",
+    "template": "template_001.png",
+    "face_region": [
+      96,
+      282,
+      236,
+      422
+    ],
+    "card_size": [
+      1188,
+      748
+    ],
+    "bg_color": [
+      255,
+      255,
+      255
+    ]
+  }
+]
