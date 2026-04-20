@@ -155,7 +155,6 @@ def generate_real_samples(
     logger.info(f"Step 4 — Generating {n} real synthetic samples …")
     males, females = partition_by_gender(face_analysis)
     all_faces      = males + females
-    rng.shuffle(all_faces)
 
     if not all_faces:
         logger.warning("No usable face images — skipping real synthetic generation.")
@@ -169,14 +168,16 @@ def generate_real_samples(
     max_attempts = n * 5
 
     pbar = tqdm(total=n, desc="Real synthetic", unit="card")
+    
+    # Shuffle once to get a randomized but strictly non-repeating sequence
+    rng.shuffle(all_faces)
 
     while generated < n and attempts < max_attempts:
         attempts += 1
         
-        # Sequentially pick to guarantee exactly 1 usage per face
+        # Sequentially grab faces to guarantee zero duplicates as long as n <= len(all_faces)
         face_idx = generated % len(all_faces)
         face_fn, face_info = all_faces[face_idx]
-        
         gender  = face_info["gender"]
         age     = face_info["age"]
 
@@ -247,7 +248,6 @@ def generate_fake_samples(
     logger.info(f"Step 5 — Generating {n} fake/forged samples …")
     males, females = partition_by_gender(face_analysis)
     all_faces      = males + females
-    rng.shuffle(all_faces)
 
     if not all_faces:
         logger.warning("No usable face images — skipping fake generation.")
@@ -265,13 +265,15 @@ def generate_fake_samples(
     cats = list(FAKE_CATEGORIES_PROBS.keys())
     probs = list(FAKE_CATEGORIES_PROBS.values())
 
+    # Shuffle once to get a randomized but strictly non-repeating sequence
+    rng.shuffle(all_faces)
+
     while generated < n and attempts < max_attempts:
         attempts += 1
         
-        # Sequentially pick to guarantee exactly 1 usage per face
+        # Sequentially grab faces 
         face_idx = generated % len(all_faces)
         face_fn, face_info = all_faces[face_idx]
-        
         actual_gender = face_info["gender"]
         actual_age    = face_info["age"]
 

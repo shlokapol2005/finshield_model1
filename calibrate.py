@@ -47,7 +47,7 @@ for name, (rx0, ry0, rx1, ry1) in REGIONS.items():
     card = card.convert("RGBA")
     card = Image.alpha_composite(card, overlay).convert("RGB")
 
-out = os.path.join(BASE, "debug_calibration.jpg")
+out = os.path.join(BASE, "debug_calibration.jpg")   #img saved
 card.save(out, quality=95)
 print(f"\nSaved -> {out}")
 for name, (rx0, ry0, rx1, ry1) in REGIONS.items():
