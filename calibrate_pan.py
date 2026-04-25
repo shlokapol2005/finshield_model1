@@ -25,7 +25,7 @@ import os, sys
 from PIL import Image, ImageDraw, ImageFont
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-PAN_IMAGE = os.path.join(BASE, "src", "sample-pan-card.jpg")
+PAN_IMAGE = os.path.join(BASE, "src", "clean_pan_sample.png")
 
 if not os.path.exists(PAN_IMAGE):
     sys.exit(f"PAN card image not found: {PAN_IMAGE}")
@@ -43,11 +43,11 @@ print(f"Card dimensions: {w} x {h} px")
 # with new synthetic data during card generation.
 
 PAN_REGIONS = {
-    "face":         (0.018, 0.260, 0.220, 0.560),   # Photo area (left side)
+"face": (0.020, 0.240, 0.210, 0.540),  # Photo area (left side)
     "pan_num":      (0.280, 0.380, 0.650, 0.460),  # PAN number (ABCDE1234F)
-    "name":         (0.035, 0.605, 0.360, 0.670),   # Applicant name value
-    "father_name":  (0.035, 0.740, 0.540, 0.800),   # Father's name value
-    "dob":         (0.015, 0.920, 0.270, 0.990),   # Date of birth value
+   "name": (0.020, 0.590, 0.345, 0.640),   # Applicant name value
+  "father_name": (0.020, 0.700, 0.485, 0.740),   # Father's name value
+   "dob": (0.015, 0.830, 0.240, 0.880),   # Date of birth value
     "qr": (0.670, 0.250, 0.970, 0.760),# qr area
 }
 

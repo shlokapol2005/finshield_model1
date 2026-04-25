@@ -1,0 +1,13 @@
+{
+  "source": "clean_pan_sample.png",
+  "template": "pan_template_001.png",
+  "card_size": [
+    1536,
+    1024
+  ],
+  "bg_color": [
+    150,
+    175,
+    223
+  ]
+}
