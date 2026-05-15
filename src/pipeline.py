@@ -94,6 +94,7 @@ def copy_real_cards(records: list) -> None:
             "age":           "",
             "dob":           "",
             "aadhaar_num":   "",
+            "face_file":     "",
             "notes":         "original_real_card",
         })
     logger.info(f"  ✓ {len(image_files)} original real cards copied.")
@@ -219,6 +220,7 @@ def generate_real_samples(
             "age":         age,
             "dob":         dob,
             "aadhaar_num": aadhaar_num,
+            "face_file":   face_fn,
             "notes":       f"consistent|name_gender={gender}|face_age={age}",
         })
         generated += 1
@@ -375,6 +377,7 @@ def generate_fake_samples(
             "age":         actual_age,
             "dob":         dob,
             "aadhaar_num": aadhaar_num,
+            "face_file":   face_fn,
             "notes":       f"cats={'+'.join(chosen_cats)}|card_gender={card_gender}|face_gender={actual_gender}",
         })
         generated += 1

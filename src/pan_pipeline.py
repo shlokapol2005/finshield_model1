@@ -444,6 +444,7 @@ def generate_real_pan_samples(
             "father_name": identity["father_name"],
             "dob": dob,
             "pan_num": pan_num,
+            "face_file": face_fn,
             "notes": f"consistent|gender={gender}|age={age}|surname={identity['surname']}",
         })
         generated += 1
@@ -594,6 +595,7 @@ def generate_fake_pan_samples(
             "father_name": identity["father_name"],
             "dob": dob,
             "pan_num": pan_num,
+            "face_file": face_fn,
             "notes": f"cats={'+'.join(chosen_cats)}|face_gender={actual_gender}",
         })
         generated += 1

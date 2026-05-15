@@ -1,0 +1,294 @@
+# Document Forgery Detection & Semantic Validation — Training Plan
+
+## Background
+
+You have a working synthetic data generation pipeline that has produced:
+
+| Dataset | Real | Fake | Total |
+|---------|------|------|-------|
+| Aadhaar (`output/`) | 390 | 300 | 690 |
+| PAN (`output_pan/`) | 299 | 299 | 598 |
+| **Combined** | **689** | **599** | **1,288** |
+
+The next step is to build and train the two core models described in your architecture:
+
+1. **Document Forgery Detection Network** — Dual-branch CNN (Spatial + Frequency)
+2. **OCR & Semantic Consistency Validator** — EasyOCR + rule-based + cross-validation
+
+Both will live in a new `training/` package inside your project.
+
+---
+
+## User Review Required
+
+> [!IMPORTANT]
+> **GPU Availability** — EfficientNet-B3 fine-tuning benefits enormously from a GPU. Do you have a CUDA-capable GPU on this machine, or should we target Google Colab / cloud training? This affects batch sizes, mixed-precision flags, and checkpoint strategies.
+
+> [!IMPORTANT]
+> **Dataset Size** — With ~1,288 images total, this is a small dataset. The plan uses aggressive data augmentation + ImageNet pre-training to compensate. If you can generate more samples (e.g., 500+ per class per doc type), accuracy will improve. Should we increase targets before training?
+
+> [!WARNING]
+> **Combined vs Separate Models** — The plan trains a **single** forgery detector that handles both Aadhaar and PAN cards together (with doc-type as a feature). This is better for generalization and matches your multimodal fusion goal. If you want separate per-doc-type models, let me know.
+
+---
+
+## Open Questions
+
+1. **Training Hardware** — Local GPU (what VRAM?) or Colab? This determines batch size (4–32) and training time.
+2. **Do you want a Colab notebook** or local Python training scripts?
+3. **Face embeddings for cross-validation** — Your architecture mentions "age-appearance correlation using face embedding." Should we use DeepFace (already installed) or add `face_recognition` / `insightface`?
+4. **Final output format** — Do you want a REST API endpoint, a CLI tool, or a Python class for inference?
+
+---
+
+## Proposed Changes
+
+### New Project Structure
+
+```
+fin_modal1/
+├── training/                     # NEW — Training package
+│   ├── __init__.py
+│   ├── config.py                 # Training hyperparameters
+│   ├── dataset.py                # PyTorch Dataset + augmentations
+│   ├── dct_utils.py              # DCT computation for frequency branch
+│   ├── model.py                  # Dual-branch model definition
+│   ├── train.py                  # Training loop
+│   ├── evaluate.py               # Evaluation + metrics + plots
+│   └── semantic_validator.py     # OCR + rule-based + cross-validation
+├── inference/                    # NEW — Inference pipeline
+│   ├── __init__.py
+│   └── predict.py                # End-to-end prediction
+├── checkpoints/                  # NEW — Saved model weights
+├── logs/                         # NEW — TensorBoard logs
+└── requirements.txt              # UPDATED — add training deps
+```
+
+---
+
+### Component 1: Dataset Preparation (`training/dataset.py`)
+
+#### [NEW] [dataset.py](file:///c:/Users/Shloka%20Pol/OneDrive/Desktop/fin_modal1/training/dataset.py)
+
+- **Unified Dataset class** — merges `output/dataset.csv` and `output_pan/pan_dataset.csv` into one training set
+- **Train/Val/Test split** — 70/15/15 stratified by label AND doc type
+- **Spatial transforms** — resize to 300×300, random horizontal flip, color jitter, random erasing, normalize (ImageNet stats)
+- **Frequency transforms** — compute 2D DCT coefficients per channel, log-scale, resize to 300×300
+- **Test-time** — deterministic center-crop + resize only
+
+---
+
+### Component 2: DCT Utilities (`training/dct_utils.py`)
+
+#### [NEW] [dct_utils.py](file:///c:/Users/Shloka%20Pol/OneDrive/Desktop/fin_modal1/training/dct_utils.py)
+
+- `compute_dct(image_tensor)` → applies `scipy.fft.dctn` per channel
+- `log_scale_dct(dct_coefficients)` → `log(1 + |coefficients|)` to compress dynamic range
+- GAN-generated images show distinctive high-frequency energy patterns that this captures
+
+---
+
+### Component 3: Dual-Branch Model (`training/model.py`)
+
+#### [NEW] [model.py](file:///c:/Users/Shloka%20Pol/OneDrive/Desktop/fin_modal1/training/model.py)
+
+```
+┌─────────────────────────────────────────────────────────┐
+│              DUAL-BRANCH FORGERY DETECTOR                │
+├──────────────────────┬──────────────────────────────────┤
+│   SPATIAL BRANCH     │    FREQUENCY BRANCH              │
+│                      │                                  │
+│  Input: RGB 300×300  │  Input: DCT 300×300 (3-ch)       │
+│         ↓            │         ↓                        │
+│  EfficientNet-B3     │  Conv(3→32, 3×3) + BN + ReLU    │
+│  (ImageNet weights)  │  Conv(32→64, 3×3) + BN + ReLU   │
+│  freeze first 4      │  MaxPool(2×2)                    │
+│  blocks initially    │  Conv(64→128, 3×3) + BN + ReLU  │
+│         ↓            │  GlobalAvgPool                   │
+│  AdaptiveAvgPool     │         ↓                        │
+│         ↓            │  FC(128 → 256)                   │
+│  1280-dim features   │  256-dim features                │
+├──────────────────────┴──────────────────────────────────┤
+│                    FUSION HEAD                           │
+│                                                         │
+│  Concat(1280 + 256) = 1536-dim                          │
+│         ↓                                               │
+│  FC(1536 → 512) + BN + ReLU + Dropout(0.4)             │
+│  FC(512 → 128) + BN + ReLU + Dropout(0.3)              │
+│  FC(128 → 2)                                            │
+│         ↓                                               │
+│  Softmax → [P(real), P(fake)]                           │
+└─────────────────────────────────────────────────────────┘
+```
+
+- **Loss**: Focal Loss (γ=2, α=0.25) to handle class imbalance
+- **Optimizer**: AdamW (lr=1e-4 spatial, lr=5e-4 frequency, lr=1e-3 fusion)
+- **Scheduler**: CosineAnnealingWarmRestarts
+- **Framework**: PyTorch + timm (for EfficientNet-B3)
+
+---
+
+### Component 4: Training Loop (`training/train.py`)
+
+#### [NEW] [train.py](file:///c:/Users/Shloka%20Pol/OneDrive/Desktop/fin_modal1/training/train.py)
+
+**Phase 1: Warm-up (5 epochs)**
+- Freeze EfficientNet-B3 backbone (first 4 blocks)
+- Train only frequency branch + fusion head
+- LR = 1e-3
+
+**Phase 2: Fine-tuning (25–40 epochs)**
+- Unfreeze all layers
+- Differential LR: backbone=1e-5, frequency=5e-4, fusion=1e-3
+- Early stopping (patience=7) on validation loss
+
+**Features:**
+- Mixed-precision training (FP16) if GPU available
+- TensorBoard logging (loss, accuracy, LR curves)
+- Best model checkpoint saving
+- Gradient clipping (max_norm=1.0)
+
+---
+
+### Component 5: Evaluation (`training/evaluate.py`)
+
+#### [NEW] [evaluate.py](file:///c:/Users/Shloka%20Pol/OneDrive/Desktop/fin_modal1/training/evaluate.py)
+
+- **Metrics**: Accuracy, Precision, Recall, F1, AUC-ROC, AUC-PR
+- **Confusion matrix** plot
+- **ROC curve** plot  
+- **Per-doc-type breakdown** (Aadhaar vs PAN performance)
+- **Grad-CAM visualizations** on sample images (spatial branch)
+- **Frequency analysis** visualization (what DCT patterns the model focuses on)
+
+---
+
+### Component 6: Semantic Consistency Validator (`training/semantic_validator.py`)
+
+#### [NEW] [semantic_validator.py](file:///c:/Users/Shloka%20Pol/OneDrive/Desktop/fin_modal1/training/semantic_validator.py)
+
+This is a **rule-based module** (no ML training needed) with three sub-components:
+
+**A. Text Extraction (EasyOCR)**
+```python
+# Extract fields from document image
+{
+    "name": "RAJESH KUMAR",
+    "dob": "15/08/1990",
+    "gender": "Male",
+    "id_number": "1234 5678 9012",  # Aadhaar
+    "pan_number": "ABCPK1234F",     # PAN
+    "father_name": "SURESH KUMAR",  # PAN only
+    "doc_type": "aadhaar" | "pan"
+}
+```
+
+**B. Rule-Based Validation**
+| Check | Rule | Fail = Suspicious |
+|-------|------|-------------------|
+| Aadhaar format | `\d{4}\s\d{4}\s\d{4}`, Verhoeff checksum | ✗ |
+| PAN format | `[A-Z]{3}[ABCFGHLJPT][A-Z]\d{4}[A-Z]` | ✗ |
+| DOB validity | Valid date, age 18–100, not future | ✗ |
+| Name characters | Only `[A-Za-z\s.]`, length 3–50 | ✗ |
+| Gender values | Must be "Male" / "Female" / "Transgender" | ✗ |
+
+**C. Semantic Cross-Validation**
+| Check | Method |
+|-------|--------|
+| Name ↔ Gender consistency | Name-gender lookup (Indian name DB) |
+| DOB ↔ Face age consistency | DeepFace age estimation vs DOB age (±10yr tolerance) |
+| Father's name ≠ Applicant name | String comparison |
+| PAN 5th char = surname initial | Check PAN[4] matches name surname[0] |
+
+**Output: Semantic risk score (0.0 – 1.0)**
+
+---
+
+### Component 7: Inference Pipeline (`inference/predict.py`)
+
+#### [NEW] [predict.py](file:///c:/Users/Shloka%20Pol/OneDrive/Desktop/fin_modal1/inference/predict.py)
+
+End-to-end prediction combining both models:
+
+```python
+result = predict_document("path/to/document.jpg")
+# Returns:
+{
+    "forgery_score": 0.87,          # From dual-branch model
+    "forgery_label": "fake",
+    "spatial_confidence": 0.82,
+    "frequency_confidence": 0.91,
+    "semantic_score": 0.65,         # From semantic validator
+    "semantic_flags": [
+        "Aadhaar checksum failed",
+        "DOB-face age mismatch (DOB=22, Face=45)"
+    ],
+    "combined_score": 0.79,         # Weighted fusion
+    "extracted_fields": { ... },
+    "grad_cam_overlay": "path/to/overlay.jpg"
+}
+```
+
+---
+
+### Component 8: Updated Dependencies
+
+#### [MODIFY] [requirements.txt](file:///c:/Users/Shloka%20Pol/OneDrive/Desktop/fin_modal1/requirements.txt)
+
+Add training dependencies:
+```
+torch>=2.0.0
+torchvision>=0.15.0
+timm>=0.9.0              # EfficientNet-B3
+scipy>=1.11.0             # DCT computation
+scikit-learn>=1.3.0       # Metrics, train/test split
+matplotlib>=3.7.0         # Plots
+seaborn>=0.12.0           # Confusion matrix heatmap
+tensorboard>=2.14.0       # Training logs
+easyocr>=1.7.0            # OCR text extraction
+pytorch-grad-cam>=1.5.0   # Grad-CAM visualizations
+```
+
+---
+
+## Verification Plan
+
+### Automated Tests
+
+1. **Dataset loading** — verify all images load, correct label distribution, no corrupted files
+2. **Model forward pass** — test with random tensor, verify output shape is `[batch, 2]`
+3. **DCT computation** — verify output shape matches input spatial dimensions
+4. **Training smoke test** — run 2 epochs on 50 images, verify loss decreases
+5. **Semantic validator** — test with known-good and known-bad field values
+6. **Full training run** — 30 epochs, target metrics:
+   - Accuracy ≥ 85%
+   - AUC-ROC ≥ 0.90
+   - F1 ≥ 0.83
+
+### Manual Verification
+
+1. Inspect Grad-CAM overlays — model should attend to face, text fields, and document edges
+2. Review frequency branch attention — should highlight high-frequency GAN artifacts
+3. Test semantic validator on real document scans
+4. Verify inference pipeline produces sensible scores end-to-end
+
+---
+
+## Execution Order
+
+```mermaid
+graph TD
+    A[1. Install dependencies] --> B[2. training/config.py]
+    B --> C[3. training/dct_utils.py]
+    C --> D[4. training/dataset.py]
+    D --> E[5. training/model.py]
+    E --> F[6. training/train.py]
+    F --> G[7. Run training]
+    G --> H[8. training/evaluate.py]
+    H --> I[9. Evaluate + plots]
+    I --> J[10. training/semantic_validator.py]
+    J --> K[11. inference/predict.py]
+    K --> L[12. End-to-end testing]
+```
+
+Estimated implementation time: **3-4 hours** for all components.
