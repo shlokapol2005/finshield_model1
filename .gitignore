@@ -1,0 +1,13 @@
+# Ignore python cache
+**/__pycache__/
+*.pyc
+
+# Ignore heavy deep learning model weights
+*.pt
+*.pth
+checkpoints/
+
+# Ignore local generated results/images (Optional, keep if you want them on GitHub)
+results/confusion_matrix.png
+results/roc_curve.png
+results/training_curves.png

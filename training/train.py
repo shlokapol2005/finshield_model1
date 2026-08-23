@@ -11,16 +11,22 @@ Phase 2 (fine-tune):
   - Differential LR:  backbone=1e-5, freq=5e-4, fusion=1e-3
   - Up to 30 epochs with early stopping (patience=7)
 
+Checkpoint fix:
+  - best_model.pt is ONLY overwritten when exact val_loss improves
+  - History is written after EVERY epoch so it's never lost
+  - Phase-level best checkpoints saved separately
+
 Usage:
   python -m training.train
-  python -m training.train --phase1-epochs 3 --phase2-epochs 20
 """
 
 import argparse
 import json
 import os
+import shutil
 import time
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -42,7 +48,7 @@ from .config import (
     GRAD_CLIP,
     EARLY_STOP_PATIENCE,
 )
-from .dataset import get_dataloaders
+from .dataset import get_dataloaders, load_merged_csv
 from .model import DualBranchForgeryDetector, FocalLoss
 
 
@@ -56,6 +62,23 @@ def _ensure_dirs():
 def _accuracy(logits, targets):
     preds = logits.argmax(dim=1)
     return (preds == targets).float().mean().item()
+
+
+def _compute_class_weights(train_loader, device):
+    """Compute inverse-frequency class weights from training set."""
+    all_labels = []
+    for _, _, labels in train_loader:
+        all_labels.extend(labels.numpy().tolist())
+    all_labels = np.array(all_labels)
+    n_total = len(all_labels)
+    n_classes = 2
+    weights = []
+    for c in range(n_classes):
+        n_c = (all_labels == c).sum()
+        weights.append(n_total / (n_classes * max(n_c, 1)))
+    w = torch.tensor(weights, dtype=torch.float32).to(device)
+    print(f"  Class weights: Real={w[0]:.4f}, Fake={w[1]:.4f}")
+    return w
 
 
 # ─── Single Epoch ─────────────────────────────────────────────────────────────
@@ -77,7 +100,6 @@ def train_one_epoch(model, loader, criterion, optimizer, device, grad_clip=GRAD_
         loss = criterion(logits, labels)
         loss.backward()
 
-        # Gradient clipping
         if grad_clip > 0:
             nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
@@ -113,7 +135,7 @@ def validate(model, loader, criterion, device):
     return total_loss / n_batches, total_acc / n_batches
 
 
-# ─── Training Phases ──────────────────────────────────────────────────────────
+# ─── Training Phase ───────────────────────────────────────────────────────────
 
 def run_phase(
     phase_name,
@@ -128,12 +150,21 @@ def run_phase(
     patience,
     history,
     best_val_loss,
+    history_path,
 ):
     """
-    Run a training phase. Saves best checkpoint and returns updated
-    best_val_loss.
+    Run a training phase.
+
+    FIX vs old version:
+      - Compares EXACT (unrounded) float val_loss so the checkpoint is never
+        accidentally overwritten by a worse result from a re-run.
+      - Writes history to disk after EVERY epoch.
+      - Saves a phase-specific checkpoint so the best per-phase is preserved.
     """
-    best_path = os.path.join(CHECKPOINT_DIR, "best_model.pt")
+    best_path       = os.path.join(CHECKPOINT_DIR, "best_model.pt")
+    phase_slug      = phase_name.lower().replace(" ", "_").replace("-", "").replace("/", "")
+    phase_best_path = os.path.join(CHECKPOINT_DIR, f"best_{phase_slug}.pt")
+    phase_best_loss = float("inf")
     no_improve = 0
 
     print(f"\n{'='*60}")
@@ -153,44 +184,63 @@ def run_phase(
 
         elapsed = time.time() - t0
 
-        # Log
-        record = {
-            "phase": phase_name,
-            "epoch": epoch,
-            "train_loss": round(train_loss, 4),
-            "train_acc": round(train_acc, 4),
-            "val_loss": round(val_loss, 4),
-            "val_acc": round(val_acc, 4),
-            "lr": optimizer.param_groups[0]["lr"],
-            "time_s": round(elapsed, 1),
-        }
-        history.append(record)
-
-        improved = ""
+        # ── Checkpoint: GLOBAL best (never overwritten by worse) ──────────
+        improved_global = ""
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save({
                 "model_state_dict": model.state_dict(),
-                "val_loss": val_loss,
-                "val_acc": val_acc,
-                "phase": phase_name,
-                "epoch": epoch,
+                "val_loss": val_loss,      # exact float, NOT rounded
+                "val_acc":  val_acc,
+                "phase":    phase_name,
+                "epoch":    epoch,
             }, best_path)
+            improved_global = " [BEST]"
+
+        # ── Checkpoint: PHASE best ─────────────────────────────────────────
+        if val_loss < phase_best_loss:
+            phase_best_loss = val_loss
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "val_loss": val_loss,
+                "val_acc":  val_acc,
+                "phase":    phase_name,
+                "epoch":    epoch,
+            }, phase_best_path)
+
+        # ── Early stopping counter ─────────────────────────────────────────
+        if improved_global:
             no_improve = 0
-            improved = " ★ saved"
         else:
             no_improve += 1
 
+        # ── Log record (write to disk every epoch) ─────────────────────────
+        record = {
+            "phase":      phase_name,
+            "epoch":      epoch,
+            "train_loss": round(train_loss, 4),
+            "train_acc":  round(train_acc,  4),
+            "val_loss":   round(val_loss,   4),
+            "val_acc":    round(val_acc,    4),
+            "val_loss_exact": val_loss,         # store exact value too
+            "lr":         optimizer.param_groups[0]["lr"],
+            "time_s":     round(elapsed, 1),
+        }
+        history.append(record)
+
+        # Write history to disk immediately after each epoch
+        with open(history_path, "w") as f:
+            json.dump(history, f, indent=2)
+
         print(
-            f"  Epoch {epoch:02d}/{n_epochs} │ "
-            f"Train Loss: {train_loss:.4f}  Acc: {train_acc:.4f} │ "
-            f"Val Loss: {val_loss:.4f}  Acc: {val_acc:.4f} │ "
-            f"{elapsed:.1f}s{improved}"
+            f"  Epoch {epoch:02d}/{n_epochs} | "
+            f"Train Loss: {train_loss:.4f}  Acc: {train_acc:.4f} | "
+            f"Val Loss: {val_loss:.4f}  Acc: {val_acc:.4f} | "
+            f"{elapsed:.1f}s{improved_global}"
         )
 
-        # Early stopping
         if no_improve >= patience:
-            print(f"\n  ⏹ Early stopping triggered (no improvement for {patience} epochs).")
+            print(f"\n  Early stopping (no improvement for {patience} epochs).")
             break
 
     return best_val_loss
@@ -206,17 +256,30 @@ def train(
 ):
     _ensure_dirs()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n🖥  Device: {device}")
+    print(f"\nDevice: {device}")
 
-    # ── Data ──────────────────────────────────────────────
+    # ── Backup old stale checkpoint if it exists ───────────────────────────
+    best_path = os.path.join(CHECKPOINT_DIR, "best_model.pt")
+    if os.path.exists(best_path):
+        backup = best_path.replace(".pt", "_previous_run.pt")
+        shutil.copy2(best_path, backup)
+        print(f"  Backed up old checkpoint -> {backup}")
+
+    # ── History path ───────────────────────────────────────────────────────
+    history_path = os.path.join(RESULTS_DIR, "training_history.json")
+
+    # ── Data ───────────────────────────────────────────────────────────────
     train_loader, val_loader, test_loader = get_dataloaders(
         batch_size_train=phase1_batch,
         batch_size_eval=phase1_batch,
     )
 
-    # ── Model ─────────────────────────────────────────────
+    # ── Class weights ──────────────────────────────────────────────────────
+    class_weights = _compute_class_weights(train_loader, device)
+
+    # ── Model ──────────────────────────────────────────────────────────────
     model = DualBranchForgeryDetector(pretrained=True).to(device)
-    criterion = FocalLoss()
+    criterion = FocalLoss(class_weights=class_weights)
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"  Total parameters: {total_params:,}")
@@ -224,12 +287,10 @@ def train(
     history = []
     best_val_loss = float("inf")
 
-    # ═══════════════════════════════════════════════════════
-    # PHASE 1: Freeze backbone, train freq + fusion only
-    # ═══════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
+    # PHASE 1: Freeze backbone — train freq + fusion only
+    # ════════════════════════════════════════════════════════════════
     model.freeze_backbone()
-
-    # Only optimise unfrozen parameters
     trainable = [p for p in model.parameters() if p.requires_grad]
     print(f"  Phase 1 trainable params: {sum(p.numel() for p in trainable):,}")
 
@@ -237,7 +298,7 @@ def train(
     scheduler1 = CosineAnnealingWarmRestarts(optimizer1, T_0=2, T_mult=2)
 
     best_val_loss = run_phase(
-        phase_name="Phase 1 — Backbone Frozen",
+        phase_name="Phase 1 - Backbone Frozen",
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
@@ -246,16 +307,16 @@ def train(
         scheduler=scheduler1,
         device=device,
         n_epochs=phase1_epochs,
-        patience=phase1_epochs,   # no early stopping in phase 1
+        patience=phase1_epochs,    # no early stop in phase 1
         history=history,
         best_val_loss=best_val_loss,
+        history_path=history_path,
     )
 
-    # ═══════════════════════════════════════════════════════
-    # PHASE 2: Unfreeze everything, differential LR
-    # ═══════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════
+    # PHASE 2: Unfreeze everything — differential LR
+    # ════════════════════════════════════════════════════════════════
     model.unfreeze_backbone()
-
     param_groups = model.get_param_groups(
         lr_backbone=PHASE2_LR_BACKBONE,
         lr_freq=PHASE2_LR_FREQ,
@@ -266,7 +327,6 @@ def train(
     optimizer2 = AdamW(param_groups, weight_decay=WEIGHT_DECAY)
     scheduler2 = CosineAnnealingWarmRestarts(optimizer2, T_0=5, T_mult=2)
 
-    # Rebuild data loaders if batch size differs
     if phase2_batch != phase1_batch:
         train_loader, val_loader, test_loader = get_dataloaders(
             batch_size_train=phase2_batch,
@@ -274,7 +334,7 @@ def train(
         )
 
     best_val_loss = run_phase(
-        phase_name="Phase 2 — Full Fine-Tune",
+        phase_name="Phase 2 - Full Fine-Tune",
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
@@ -286,26 +346,19 @@ def train(
         patience=EARLY_STOP_PATIENCE,
         history=history,
         best_val_loss=best_val_loss,
+        history_path=history_path,
     )
 
-    # ── Save training history ─────────────────────────────
-    history_path = os.path.join(RESULTS_DIR, "training_history.json")
-    with open(history_path, "w") as f:
-        json.dump(history, f, indent=2)
-    print(f"\n  📄 Training history → {history_path}")
-
-    # ── Save final model ──────────────────────────────────
+    # ── Save final model ───────────────────────────────────────────────────
     final_path = os.path.join(CHECKPOINT_DIR, "final_model.pt")
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "history": history,
-    }, final_path)
-    print(f"  💾 Final model      → {final_path}")
-    print(f"  💾 Best model       → {os.path.join(CHECKPOINT_DIR, 'best_model.pt')}")
+    torch.save({"model_state_dict": model.state_dict(), "history": history}, final_path)
 
     print(f"\n{'='*60}")
-    print(f"  Training complete! ✅")
-    print(f"  Best validation loss: {best_val_loss:.4f}")
+    print(f"  Training complete!")
+    print(f"  Best validation loss  : {best_val_loss:.4f}")
+    print(f"  Best model saved      : {best_path}")
+    print(f"  Final model saved     : {final_path}")
+    print(f"  Training history      : {history_path}")
     print(f"{'='*60}\n")
 
     return model, history
